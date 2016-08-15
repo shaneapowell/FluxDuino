@@ -5,6 +5,8 @@
 #include <FunctionTask.h>
 #include "ButtonTask.h"
 
+#define arrayLen(x)  (sizeof(x) / sizeof(x[0]))
+
 #define B0 0
 #define B1 1
 #define B2 2
@@ -16,34 +18,65 @@
 #define L2 8
 #define STATUS 9
 #define LAST L2
+#define ANALOG_MAX 1024
+#define SPEED_SCALE_RANGE 3.0
+#define SPEED_SCALE_MIN 0.04
 
 #define OFF 0x000000;
 
 /**
- * Prototypes
+ * Prototypes.. due to the order of functions in this file, I only needed these 2 for Task.h
  **/
 void heartbeat(uint32_t deltaTime);
 void onSwitchAnimation(uint8_t buttonId, ButtonTask::ButtonState state);
 
-/**
- * Variables
- **/
-uint8_t switchPin = 2;
-uint8_t dataPin  = 11;    // Yellow wire on Adafruit Pixels
-uint8_t clockPin = 13;    // Green wire on Adafruit Pixels
+/* The animation cycle switch input pin */
+uint8_t switchPin = PD2;
+
+/* The SPI data pin, yellow wire on Pixel String */
+uint8_t dataPin  = PD3;
+
+/* The SPI clock pin, green wire on pixel string */
+uint8_t clockPin = PD4;
+
+/* The analog speed adjustment input pin */
+uint8_t analogInputPin = A0;
+
+/* The strip of ADAFruit pixels.  My FluxCapacitor has 9 main pixels, and 1 status pixel at the end */
 Adafruit_WS2801 strip = Adafruit_WS2801(10, dataPin, clockPin);
 
+/* Task.h manager and callback functions.  One to to update the status pixel, one to track button inputs */
 TaskManager mTaskManager;
 FunctionTask mHeartbeatTask(heartbeat, MsToTaskTime(500));
 ButtonTask mButtonTask(onSwitchAnimation, 0, switchPin);
 
+/* The current animation step */
 uint32_t mStep = 0;
+
+/* The number of steps to perform, before resetting the step count back to zero */
 uint32_t mStepCount = 1;
+
+/* Track each time the step is reset back to zero */
 uint32_t mStepResetCount = 0;
+
+/* The number of milliseconds between each step executing */
 unsigned long mStepDelay = 100;
+
+/* The time of the last step, so we know if it's time to fire the next step */
 unsigned long mLastStepMillis = 0;
+
+/* A list of animation functions that can be cycled through */
+void (* mAnimationFunctions [5])();
+
+/* The current index into the mAnimationFunctions array */
 uint8_t mAnimationIndex = 0;
 
+/* The calculated step speed scale, derived from the analog input pin */
+float mSpeedScale = 1.0; /* Cycles between SPEED_SCALE_MIN and SPEED_SCALE_MAX */
+
+/* Used by the optional heartbeat pixel (#10) and just steps through a few colors off/on */
+uint32_t mHeartBeatColors[] = {0x020000, 0x000200, 0x000002};
+uint8_t mHeartBeatIndex = 0;
 
 /******************************************************************************
  *
@@ -56,7 +89,7 @@ void onSwitchAnimation(uint8_t buttonId, ButtonTask::ButtonState state)
 		mStep = 0;
 		mStepCount = 1;
 		mAnimationIndex++;
-		if (mAnimationIndex >= 4)
+		if (mAnimationIndex >= arrayLen(mAnimationFunctions))
 		{
 			mAnimationIndex = 0;
 		}
@@ -64,19 +97,28 @@ void onSwitchAnimation(uint8_t buttonId, ButtonTask::ButtonState state)
 }
 
 /******************************************************************************
- *
+ * Just cycle the 10th pixel around the array of blink colors
  ******************************************************************************/
 void heartbeat(uint32_t deltaTime)
 {
+
 	uint32_t color = strip.getPixelColor(STATUS);
+
 	if (color > 0)
 	{
 		color = 0x00;
 	}
 	else
 	{
-		color = 0x990000;
+		mHeartBeatIndex++;
+		if (mHeartBeatIndex >= arrayLen(mHeartBeatColors))
+		{
+			mHeartBeatIndex = 0;
+		}
+
+		color = mHeartBeatColors[mHeartBeatIndex];
 	}
+
 	strip.setPixelColor(STATUS, color);
 }
 
@@ -124,6 +166,15 @@ void allOff()
 	}
 }
 
+/*****************************************************************************
+ *
+ ****************************************************************************/
+void animateOff()
+{
+	mStepDelay = 250;
+	mStepCount = 2;
+	allOff();
+}
 
 /******************************************************************************
  *
@@ -286,8 +337,15 @@ void setup()
 {
 	Serial.begin(9600);
 
+	mAnimationFunctions[0] = animate88MPH;
+	mAnimationFunctions[1] = animateCylon;
+	mAnimationFunctions[2] = animateRainbowCycle;
+	mAnimationFunctions[3] = animateRainbow;
+	mAnimationFunctions[4] = animateOff;
+
 	mTaskManager.StartTask(&mHeartbeatTask);
 	mTaskManager.StartTask(&mButtonTask);
+
 	pinMode(switchPin, INPUT_PULLUP);
 
 	strip.begin();
@@ -302,8 +360,13 @@ void loop()
 {
 	mTaskManager.Loop();
 
+	/* Calculate the analog speed adjustment */
+	int analogIn = analogRead(analogInputPin);	mSpeedScale = ((float)analogIn) * SPEED_SCALE_RANGE / ANALOG_MAX;
+	mSpeedScale = SPEED_SCALE_RANGE - mSpeedScale; /* I wired the left and right pins of my pot backwards.. so .. reverse the final value */
+	mSpeedScale += SPEED_SCALE_MIN;
+
 	unsigned long now = millis();
-	if (now - mLastStepMillis >= mStepDelay)
+	if (now - mLastStepMillis >= (mStepDelay * mSpeedScale))
 	{
 		/* Move the step index */
 		mStep++;
@@ -314,25 +377,7 @@ void loop()
 		}
 
 		/* Fire the current animation */
-		switch(mAnimationIndex)
-		{
-			default:
-			case 0:
-				animate88MPH();
-			break;
-
-			case 1:
-				animateCylon();
-			break;
-
-			case 2:
-				animateRainbowCycle();
-			break;
-
-			case 3:
-				animateRainbow();
-			break;
-		}
+		(*mAnimationFunctions[mAnimationIndex])();
 
 		/* Delay the next step */
 		mLastStepMillis = now;
